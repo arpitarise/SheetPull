@@ -1,1 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Multi-File Sheet Extractor</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        base: '#121212',
+                        surface: '#1E1E1E',
+                        elevated: '#2D2D2D',
+                        accent: '#6C63FF',
+                        accentHover: '#5A52D5',
+                        danger: '#FF5C5C',
+                        success: '#00C853',
+                        borderLight: '#383838'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #1E1E1E; }
+        ::-webkit-scrollbar-thumb { background: #555; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb:hover { background: #777; }
+        
+        .loader {
+            width: 48px;
+            height: 48px;
+            border: 4px solid #383838;
+            border-bottom-color: #6C63FF;
+            border-radius: 50%;
+            display: inline-block;
+            animation: rotation 1s linear infinite;
+        }
+        @keyframes rotation {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-base text-gray-200 font-sans min-h-screen flex flex-col m-0 p-0">
 
+    <header class="text-center py-10 px-4 bg-surface border-b border-borderLight">
+        <h1 class="text-3xl font-semibold mb-2 tracking-tight text-white">Sheet Extractor Tool</h1>
+        <p class="text-gray-400 text-base m-0">Combine multiple Excel files by selected sheets</p>
+    </header>
+
+    <main class="flex-grow w-full max-w-6xl mx-auto p-6 md:p-10 flex flex-col gap-8">
+        <input type="file" id="file-input" accept=".xlsx, .xls, .csv" multiple class="hidden">
+        
+        <div id="dropzone" class="bg-surface border-2 border-dashed border-accent rounded-xl p-12 text-center cursor-pointer transition-colors duration-300 relative hover:bg-accent/10">
+            <div class="text-4xl text-accent mb-4">📥</div>
+            <div class="text-lg mb-2 text-white">Drag & drop .xlsx files here</div>
+            <div class="text-sm text-gray-400 mb-4">or click to browse</div>
+            <div class="inline-block bg-white/5 px-3 py-1.5 rounded text-xs text-gray-400 border border-gray-700 mt-2">
+                ⚠️ Limit: Max 25 files at once, Up to 100 MB per file
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8 items-start">
+            <div>
+                <div class="flex justify-between items-center border-b border-borderLight pb-3 mb-5">
+                    <h3 class="text-lg font-semibold text-white m-0">Uploaded Files</h3>
+                    <span id="files-counter" class="text-sm text-gray-400">0 / 25 files</span>
+                </div>
+                <div id="file-list" class="flex flex-col gap-3 max-h-[400px] overflow-y-auto pr-2">
+                    <div id="empty-files" class="text-gray-400 text-center italic w-full py-8 text-sm">No files uploaded yet.</div>
+                </div>
+            </div>
+
+            <div>
+                <div class="flex justify-between items-center border-b border-borderLight pb-3 mb-5">
+                    <h3 class="text-lg font-semibold text-white m-0">Detected Sheets</h3>
+                    <span class="text-sm text-gray-400">Select to merge</span>
+                </div>
+                <div id="chips-container" class="flex flex-wrap gap-3">
+                    <div id="empty-sheets" class="text-gray-400 text-center italic w-full py-8 text-sm">Upload files to detect sheets.</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="bg-surface border-t border-borderLight p-6 flex justify-between items-center sticky bottom-0 z-40 shadow-[0_-4px_10px_rgba(0,0,0,0.2)] flex-wrap gap-4">
+        <div id="summary-text" class="text-lg font-medium text-white">0 sheets selected → 0 total rows will be extracted</div>
+        <button id="export-btn" class="bg-accent text-white border-none py-3 px-8 rounded-lg text-base font-semibold cursor-pointer transition-colors hover:bg-accentHover disabled:bg-[#383838] disabled:text-gray-500 disabled:cursor-not-allowed disabled:opacity-70" disabled>Export Output</button>
+    </footer>
+
+    <div id="loader-overlay" class="fixed inset-0 bg-base/80 hidden flex-col justify-center items-center z-50 backdrop-blur-sm">
+        <div class="loader mb-6"></div>
+        <h2 id="loader-message" class="m-0 font-normal text-lg text-white">Parsing files...</h2>
+    </div>
+
+    <script>
+        const MAX_FILES = 25;
+        const MAX_MB = 100;
+        const MAX_BYTES = MAX_MB * 1024 * 1024;
+
+        let parsedFiles = [];
+        let selectedSheetsOrder =[];
+        let aggregatedSheetStats = {};
+
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const fileListContainer = document.getElementById('file-list');
+        const chipsContainer = document.getElementById('chips-container');
+        const summaryTextEl = document.getElementById('summary-text');
+        const exportBtn = document.getElementById('export-btn');
+        const emptyFilesUI = document.getElementById('empty-files');
+        const emptySheetsUI = document.getElementById('empty-sheets');
+        const loaderOverlay = document.getElementById('loader-overlay');
+        const loaderMessage = document.getElementById('loader-message');
+        const filesCounter = document.getElementById('files-counter');
+
+        dropzone.addEventListener('click', () => fileInput.click());
+
+        dropzone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropzone.classList.add('bg-accent/10', 'border-success');
+        });
+
+        dropzone.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('bg-accent/10', 'border-success');
+        });
+
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('bg-accent/10', 'border-success');
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                handleFileUpload(e.dataTransfer.files);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files && e.target.files.length > 0) {
+                handleFileUpload(e.target.files);
+            }
+            e.target.value = null;
+        });
+
+        exportBtn.addEventListener('click', runExtractionAndExport);
+
+        async function handleFileUpload(files) {
+            let newFiles = Array.from(files);
+
+            if (parsedFiles.length >= MAX_FILES) {
+                alert(`You have already uploaded the maximum allowed limit of ${MAX_FILES} files.`);
+                return;
+            }
+
+            if (parsedFiles.length + newFiles.length > MAX_FILES) {
+                const allowed = MAX_FILES - parsedFiles.length;
+                alert(`You can only upload up to ${MAX_FILES} files at once.\nOnly the first ${allowed} files will be loaded.`);
+                newFiles = newFiles.slice(0, allowed);
+            }
+
+            let skippedFiles = [];
+            let validFiles =[];
+
+            newFiles.forEach(file => {
+                const name = file.name.toLowerCase();
+                if (name.endsWith('.xls') || name.endsWith('.xlsx') || name.endsWith('.csv')) {
+                    if (file.size > MAX_BYTES) {
+                        skippedFiles.push(file.name);
+                    } else {
+                        validFiles.push(file);
+                    }
+                }
+            });
+
+            if (skippedFiles.length > 0) {
+                alert(`The following file(s) exceed the ${MAX_MB} MB size limit and will be skipped:\n\n` + skippedFiles.join('\n'));
+            }
+
+            if (validFiles.length === 0) return;
+
+            showLoader("Processing Excel files...");
+            await new Promise(r => setTimeout(r, 60));
+
+            for (const file of validFiles) {
+                try {
+                    const buffer = await file.arrayBuffer();
+                    const wb = XLSX.read(buffer, { type: "array" });
+                    
+                    parsedFiles.push({
+                        id: 'file_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+                        name: file.name,
+                        wb: wb,
+                        sheetCount: wb.SheetNames.length
+                    });
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+
+            processAllData();
+            hideLoader();
+        }
+
+        window.removeUploadedFile = function(fileId) {
+            parsedFiles = parsedFiles.filter(f => f.id !== fileId);
+            processAllData();
+        }
+
+        function processAllData() {
+            aggregatedSheetStats = {};
+
+            parsedFiles.forEach(fileObj => {
+                fileObj.wb.SheetNames.forEach(sheetName => {
+                    aggregatedSheetStats[sheetName] = (aggregatedSheetStats[sheetName] || 0) + 1;
+                });
+            });
+
+            selectedSheetsOrder = selectedSheetsOrder.filter(sheet => aggregatedSheetStats[sheet]);
+
+            renderUIElements();
+            updateExportSummary();
+        }
+
+        function renderUIElements() {
+            fileListContainer.innerHTML = '';
+            filesCounter.textContent = `${parsedFiles.length} / ${MAX_FILES} files`;
+
+            if (parsedFiles.length === 0) {
+                emptyFilesUI.style.display = 'block';
+                fileListContainer.appendChild(emptyFilesUI);
+            } else {
+                emptyFilesUI.style.display = 'none';
+                parsedFiles.forEach(fileState => {
+                    const fileCard = document.createElement('div');
+                    fileCard.className = 'bg-surface border border-borderLight rounded-lg p-3 flex justify-between items-center gap-4';
+                    
+                    fileCard.innerHTML = `
+                        <div class="flex-grow overflow-hidden">
+                            <div class="font-medium whitespace-nowrap overflow-hidden text-ellipsis mb-1 text-white" title="${fileState.name}">${fileState.name}</div>
+                            <div class="text-xs text-gray-400">Contains ${fileState.sheetCount} sheets</div>
+                        </div>
+                        <button class="bg-transparent border border-borderLight text-white py-1.5 px-3 rounded-md cursor-pointer transition-colors text-sm font-medium hover:border-danger hover:text-danger hover:bg-danger/10" onclick="removeUploadedFile('${fileState.id}')">Remove</button>
+                    `;
+                    fileListContainer.appendChild(fileCard);
+                });
+            }
+
+            chipsContainer.innerHTML = '';
+            const sheetNames = Object.keys(aggregatedSheetStats);
+            
+            if (sheetNames.length === 0) {
+                emptySheetsUI.style.display = 'block';
+                chipsContainer.appendChild(emptySheetsUI);
+            } else {
+                emptySheetsUI.style.display = 'none';
+                sheetNames.forEach(sheetName => {
+                    const count = aggregatedSheetStats[sheetName];
+                    const isSelected = selectedSheetsOrder.includes(sheetName);
+                    
+                    const chip = document.createElement('div');
+                    chip.className = `bg-elevated border-2 rounded-full py-1.5 px-3 pl-4 flex items-center cursor-pointer transition-colors select-none ${isSelected ? 'border-accent bg-accent/15' : 'border-transparent hover:bg-[#3B3B3B]'}`;
+                    
+                    chip.onclick = () => toggleSelectionState(sheetName);
+
+                    chip.innerHTML = `
+                        <span class="text-sm font-medium mr-2.5 text-white">${sheetName}</span>
+                        <span class="${isSelected ? 'bg-accent text-white border-transparent' : 'bg-[#1A1A1A] text-gray-400 border-borderLight'} text-xs py-1 px-2.5 rounded-full font-semibold border">×${count}</span>
+                    `;
+                    chipsContainer.appendChild(chip);
+                });
+            }
+        }
+
+        function toggleSelectionState(sheetName) {
+            const index = selectedSheetsOrder.indexOf(sheetName);
+            if (index > -1) {
+                selectedSheetsOrder.splice(index, 1);
+            } else {
+                selectedSheetsOrder.push(sheetName);
+            }
+            renderUIElements();
+            updateExportSummary();
+        }
+        
+        function estimateQuickRowsOfSheet(ws) {
+            if(!ws['!ref']) {
+               const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", blankrows: true });
+               return data.length;
+            }
+            const range = XLSX.utils.decode_range(ws['!ref']);
+            return (range.e.r - range.s.r) + 1;
+        }
+
+        function updateExportSummary() {
+            let totalRows = 0;
+            
+            selectedSheetsOrder.forEach(sheetName => {
+                let isFirstFileForSheet = true;
+                
+                parsedFiles.forEach(fileObj => {
+                     if (fileObj.wb.SheetNames.includes(sheetName)) {
+                         const ws = fileObj.wb.Sheets[sheetName];
+                         const rows = estimateQuickRowsOfSheet(ws);
+                         
+                         if(rows > 0) {
+                              if(isFirstFileForSheet) {
+                                   totalRows += rows;
+                                   isFirstFileForSheet = false;
+                              } else {
+                                   if (rows > 1) {
+                                       totalRows += (rows - 1); 
+                                   }
+                              }
+                         }
+                     }
+                });
+            });
+
+            if (selectedSheetsOrder.length === 0) {
+                summaryTextEl.textContent = "0 sheets selected → 0 total rows will be extracted";
+                exportBtn.disabled = true;
+            } else {
+                summaryTextEl.textContent = `${selectedSheetsOrder.length} sheet${selectedSheetsOrder.length > 1 ? 's' : ''} selected → ~${totalRows} rows to be extracted`;
+                exportBtn.disabled = false;
+            }
+        }
+
+        function runExtractionAndExport() {
+            if (selectedSheetsOrder.length === 0 || parsedFiles.length === 0) {
+                alert("Please add files and select at least one sheet.");
+                return;
+            }
+
+            showLoader("Formatting and exporting data...");
+            
+            setTimeout(() => {
+                try {
+                    const newWb = XLSX.utils.book_new();
+
+                    selectedSheetsOrder.forEach(sheetName => {
+                         let mergedData =[];
+                         let foundHeader = false; 
+
+                         parsedFiles.forEach(fileObj => {
+                             if(fileObj.wb.SheetNames.includes(sheetName)) {
+                                 const ws = fileObj.wb.Sheets[sheetName];
+                                 const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", blankrows: true });
+
+                                 if(!data || data.length === 0) return; 
+                                 
+                                 if(!foundHeader) {
+                                     mergedData = mergedData.concat(data); 
+                                     foundHeader = true;
+                                 } else {
+                                     if(data.length > 1) {
+                                         mergedData = mergedData.concat(data.slice(1));
+                                     }
+                                 }
+                             }
+                         });
+
+                         if (mergedData.length > 0) {
+                              const newWs = XLSX.utils.aoa_to_sheet(mergedData);
+                              
+                              const colWidths =[];
+                              mergedData.forEach(row => {
+                                  row.forEach((cellValue, colIdx) => {
+                                      const valStr = cellValue !== null && cellValue !== undefined ? cellValue.toString() : "";
+                                      const currentWidth = colWidths[colIdx] || { wch: 12 };
+                                      if (valStr.length > (currentWidth.wch - 2)) {
+                                          colWidths[colIdx] = { wch: Math.min(valStr.length + 2, 60) };
+                                      } else {
+                                          colWidths[colIdx] = currentWidth;
+                                      }
+                                  });
+                              });
+                              newWs['!cols'] = colWidths;
+                              newWs['!views'] =[{ state: 'frozen', xSplit: 0, ySplit: 1 }];
+
+                              const range = XLSX.utils.decode_range(newWs['!ref']);
+                              for (let R = range.s.r; R <= range.e.r; ++R) {
+                                  for (let C = range.s.c; C <= range.e.c; ++C) {
+                                      const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+                                      if (!newWs[cellAddress]) continue;
+
+                                      if (R === 0) {
+                                          newWs[cellAddress].s = {
+                                              font: { bold: true, color: { rgb: "FFFFFF" }, sz: 12 },
+                                              fill: { fgColor: { rgb: "6C63FF" } },
+                                              alignment: { horizontal: "center", vertical: "center", wrapText: true },
+                                              border: {
+                                                  top: { style: "thin", color: { rgb: "000000" } },
+                                                  bottom: { style: "medium", color: { rgb: "000000" } },
+                                                  left: { style: "thin", color: { rgb: "000000" } },
+                                                  right: { style: "thin", color: { rgb: "000000" } }
+                                              }
+                                          };
+                                      } else {
+                                          newWs[cellAddress].s = {
+                                              alignment: { vertical: "center", wrapText: true },
+                                              border: {
+                                                  top: { style: "thin", color: { rgb: "D3D3D3" } },
+                                                  bottom: { style: "thin", color: { rgb: "D3D3D3" } },
+                                                  left: { style: "thin", color: { rgb: "D3D3D3" } },
+                                                  right: { style: "thin", color: { rgb: "D3D3D3" } }
+                                              }
+                                          };
+                                      }
+                                  }
+                              }
+
+                              let safeSheetName = sheetName.replace(/[\[\]\/?*:\\]/g, '').slice(0, 31);
+                              XLSX.utils.book_append_sheet(newWb, newWs, safeSheetName || 'UnknownSheetExport');
+                         }
+                    });
+
+                    XLSX.writeFile(newWb, "extracted_output.xlsx");
+
+                } catch (err) {
+                    console.error(err);
+                    alert("Failure generating excel file.");
+                }
+                
+                hideLoader();
+            }, 60); 
+        }
+
+        function showLoader(msg = "Processing Data...") {
+             loaderMessage.innerText = msg;
+             loaderOverlay.style.display = 'flex';
+        }
+
+        function hideLoader() {
+             loaderOverlay.style.display = 'none';
+        }
+    </script>
+</body>
+</html>
